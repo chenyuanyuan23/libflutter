@@ -446,6 +446,16 @@ show_build_mode() {
     echo
 }
 
+# Ctrl+C 时杀掉所有 ninja 进程
+cleanup() {
+    trap - INT TERM
+    echo
+    log_warning "收到中断信号，正在停止所有编译任务..."
+    killall ninja 2>/dev/null
+    kill 0 2>/dev/null
+}
+trap cleanup INT TERM
+
 # 主函数
 main() {
     # 解析命令行参数
@@ -494,8 +504,7 @@ main() {
     
     # 第二阶段: 并行编译
     log_info "=== 第二阶段: 开始编译 ==="
-    
-    # 并行编译（限制同时运行的ninja进程数，避免资源争抢）
+
     local current_jobs=0
     local pids=()
     local job_names=()
@@ -532,12 +541,22 @@ main() {
         ((current_jobs++))
     done
 
-    # 等待所有任务完成
+    # 等待所有任务完成（用 sleep 轮询，确保 Ctrl+C 能中断）
     log_info "等待所有编译任务完成..."
+    while true; do
+        local all_done=true
+        for pid in "${pids[@]}"; do
+            if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+                all_done=false
+                break
+            fi
+        done
+        $all_done && break
+        sleep 1
+    done
+    # 收集退出码
     for pid in "${pids[@]}"; do
-        if [ -n "$pid" ]; then
-            wait "$pid"
-        fi
+        [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
     done
 
     # Strip阶段（如果启用）

@@ -22,7 +22,6 @@ UNIFIED_REPO="${ROOT_DIR}/flutter_unified_repo"
 ENGINE_SRC="${UNIFIED_REPO}/engine/src"
 PATCHES_DIR="${SCRIPT_DIR}/patches_backup"
 DEPOT_TOOLS="${ROOT_DIR}/depot_tools"
-OUT_CACHE="${ROOT_DIR}/out_cache"         # 各版本编译产物缓存目录
 
 # 选项
 VERSION=""
@@ -32,6 +31,7 @@ LIST_VERSIONS=false
 SHOW_CURRENT=false
 BRANCH_SUFFIX="image_crash"
 SKIP_PATCHES=false
+GCLIENT_DELETE=false
 
 # 颜色输出
 RED='\033[0;31m'
@@ -61,6 +61,7 @@ Flutter Engine 版本切换脚本 v${SCRIPT_VERSION}
 选项:
   --no-sync                 跳过 gclient sync
   --sync-only               仅运行 gclient sync（版本已切换时使用）
+  -D                        gclient sync 时删除无用依赖目录（默认不删）
   --suffix SUFFIX           自定义分支后缀 (默认: ${BRANCH_SUFFIX})
   --list, -l                列出可用的稳定版本
   --current, -c             显示当前版本信息
@@ -101,6 +102,11 @@ parse_args() {
                     exit 1
                 fi
                 shift 2
+                ;;
+            -D)
+                GCLIENT_DELETE=true
+                log_info "已启用 gclient sync -D 选项"
+                shift
                 ;;
             --list|-l)
                 LIST_VERSIONS=true
@@ -228,59 +234,12 @@ show_current() {
 }
 
 # 保存当前版本的 out/ 到缓存
-save_out_cache() {
-    local out_dir="${ENGINE_SRC}/out"
-    [ ! -d "$out_dir" ] && return 0
-
-    # 检测当前版本号
-    cd "$UNIFIED_REPO"
-    local current_branch
-    current_branch=$(git branch --show-current 2>/dev/null || echo "")
-    local current_ver
-    current_ver=$(echo "$current_branch" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || echo "")
-
-    if [ -z "$current_ver" ]; then
-        log_info "当前不在版本分支上，跳过 out/ 缓存保存"
-        return 0
-    fi
-
-    local cache_dir="${OUT_CACHE}/${current_ver}"
-    if [ -d "$cache_dir" ]; then
-        log_info "更新 out/ 缓存: ${current_ver}"
-        rm -rf "$cache_dir"
-    else
-        log_info "保存 out/ 缓存: ${current_ver}"
-    fi
-    mkdir -p "$OUT_CACHE"
-    mv "$out_dir" "$cache_dir"
-    log_success "out/ 已缓存到 out_cache/${current_ver}"
-}
-
-# 恢复目标版本的 out/ 缓存
-restore_out_cache() {
-    local version="$1"
-    local cache_dir="${OUT_CACHE}/${version}"
-    local out_dir="${ENGINE_SRC}/out"
-
-    if [ -d "$cache_dir" ]; then
-        # 清理 sync 可能产生的新 out/
-        [ -d "$out_dir" ] && rm -rf "$out_dir"
-        mv "$cache_dir" "$out_dir"
-        log_success "已恢复 out/ 缓存: ${version} (增量编译可用)"
-    else
-        log_info "版本 ${version} 无 out/ 缓存，将全量编译"
-    fi
-}
-
 # 切换版本
 switch_version() {
     local version="$1"
     local branch_name="${version}-${BRANCH_SUFFIX}"
 
     cd "$UNIFIED_REPO"
-
-    # 切换前：保存当前版本的 out/
-    save_out_cache
 
     # 检查 tag 是否存在
     if ! git tag -l "$version" | grep -q "^${version}$"; then
@@ -469,8 +428,15 @@ run_gclient_sync() {
     log_info "工作目录: $(pwd)"
     echo
 
+    local sync_args=""
+    if [ "$GCLIENT_DELETE" = "true" ]; then
+        sync_args="-D"
+        log_info "已启用 -D 参数（删除无用依赖目录）"
+    fi
+
+    log_info "执行: gclient sync ${sync_args}"
     local sync_exit_code=0
-    gclient sync || sync_exit_code=$?
+    gclient sync $sync_args || sync_exit_code=$?
 
     if [ $sync_exit_code -eq 0 ]; then
         log_success "gclient sync 完成"
@@ -579,11 +545,7 @@ main() {
         echo
     fi
 
-    # 4. 恢复目标版本的编译缓存
-    restore_out_cache "$VERSION"
-    echo
-
-    # 5. 显示摘要
+    # 4. 显示摘要
     show_summary "$VERSION"
 }
 
