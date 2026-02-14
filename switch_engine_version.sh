@@ -22,6 +22,7 @@ UNIFIED_REPO="${ROOT_DIR}/flutter_unified_repo"
 ENGINE_SRC="${UNIFIED_REPO}/engine/src"
 PATCHES_DIR="${SCRIPT_DIR}/patches_backup"
 DEPOT_TOOLS="${ROOT_DIR}/depot_tools"
+OUT_CACHE="${ROOT_DIR}/out_cache"         # 各版本编译产物缓存目录
 
 # 选项
 VERSION=""
@@ -226,12 +227,60 @@ show_current() {
     fi
 }
 
+# 保存当前版本的 out/ 到缓存
+save_out_cache() {
+    local out_dir="${ENGINE_SRC}/out"
+    [ ! -d "$out_dir" ] && return 0
+
+    # 检测当前版本号
+    cd "$UNIFIED_REPO"
+    local current_branch
+    current_branch=$(git branch --show-current 2>/dev/null || echo "")
+    local current_ver
+    current_ver=$(echo "$current_branch" | grep -oE '^[0-9]+\.[0-9]+\.[0-9]+' || echo "")
+
+    if [ -z "$current_ver" ]; then
+        log_info "当前不在版本分支上，跳过 out/ 缓存保存"
+        return 0
+    fi
+
+    local cache_dir="${OUT_CACHE}/${current_ver}"
+    if [ -d "$cache_dir" ]; then
+        log_info "更新 out/ 缓存: ${current_ver}"
+        rm -rf "$cache_dir"
+    else
+        log_info "保存 out/ 缓存: ${current_ver}"
+    fi
+    mkdir -p "$OUT_CACHE"
+    mv "$out_dir" "$cache_dir"
+    log_success "out/ 已缓存到 out_cache/${current_ver}"
+}
+
+# 恢复目标版本的 out/ 缓存
+restore_out_cache() {
+    local version="$1"
+    local cache_dir="${OUT_CACHE}/${version}"
+    local out_dir="${ENGINE_SRC}/out"
+
+    if [ -d "$cache_dir" ]; then
+        # 清理 sync 可能产生的新 out/
+        [ -d "$out_dir" ] && rm -rf "$out_dir"
+        mv "$cache_dir" "$out_dir"
+        log_success "已恢复 out/ 缓存: ${version} (增量编译可用)"
+    else
+        log_info "版本 ${version} 无 out/ 缓存，将全量编译"
+    fi
+}
+
 # 切换版本
 switch_version() {
     local version="$1"
     local branch_name="${version}-${BRANCH_SUFFIX}"
 
     cd "$UNIFIED_REPO"
+
+    # 切换前：保存当前版本的 out/
+    save_out_cache
 
     # 检查 tag 是否存在
     if ! git tag -l "$version" | grep -q "^${version}$"; then
@@ -292,15 +341,50 @@ switch_version() {
     log_success "已创建并切换到分支: ${branch_name}"
 }
 
+# 根据版本号选择对应的补丁文件
+select_patches_for_version() {
+    local version="$1"
+    local selected=()
+
+    # 版本比较: 提取主版本号用于分流
+    local minor
+    minor=$(echo "$version" | cut -d. -f2)
+
+    if [ "$minor" -ge 41 ] 2>/dev/null; then
+        # >= 3.41.0 用新版补丁
+        for patch in "$PATCHES_DIR"/*v3.41.0+*.patch; do
+            [ -f "$patch" ] && selected+=("$patch")
+        done
+        log_info "版本 ${version} >= 3.41.0，使用 v3.41.0+ 补丁" >&2
+    else
+        # < 3.41.0 用旧版补丁
+        for patch in "$PATCHES_DIR"/*v3.38*.patch; do
+            [ -f "$patch" ] && selected+=("$patch")
+        done
+        log_info "版本 ${version} < 3.41.0，使用 v3.38 补丁" >&2
+    fi
+
+    # 如果没找到版本特定补丁，回退到通用补丁
+    if [ ${#selected[@]} -eq 0 ]; then
+        log_warning "未找到版本特定补丁，尝试使用通用补丁" >&2
+        for patch in "$PATCHES_DIR"/*.patch; do
+            local name=$(basename "$patch")
+            # 跳过版本特定的补丁文件
+            [[ "$name" == *"_v3."* ]] && continue
+            [ -f "$patch" ] && selected+=("$patch")
+        done
+    fi
+
+    echo "${selected[@]}"
+}
+
 # 应用补丁
 apply_patches() {
     cd "$UNIFIED_REPO"
 
-    # 查找所有 .patch 文件并排序
+    # 根据版本选择补丁
     local patches=()
-    for patch in "$PATCHES_DIR"/*.patch; do
-        [ -f "$patch" ] && patches+=("$patch")
-    done
+    IFS=' ' read -ra patches <<< "$(select_patches_for_version "$VERSION")"
 
     if [ ${#patches[@]} -eq 0 ]; then
         log_warning "patches_backup 目录中没有找到 .patch 文件"
@@ -385,28 +469,8 @@ run_gclient_sync() {
     log_info "工作目录: $(pwd)"
     echo
 
-    # 保护 out/ 目录不被 -D 删除
-    local out_dir="${ENGINE_SRC}/out"
-    local out_backup="${ROOT_DIR}/.out_backup"
-    if [ -d "$out_dir" ]; then
-        log_info "保护编译产物: 暂存 out/ 目录..."
-        mv "$out_dir" "$out_backup"
-    fi
-
     local sync_exit_code=0
-    gclient sync -D || sync_exit_code=$?
-
-    # 恢复 out/ 目录
-    if [ -d "$out_backup" ]; then
-        # 如果 sync 又生成了新的 out/，合并保留
-        if [ -d "$out_dir" ]; then
-            cp -a "$out_backup"/* "$out_dir"/ 2>/dev/null || true
-            rm -rf "$out_backup"
-        else
-            mv "$out_backup" "$out_dir"
-        fi
-        log_info "编译产物已恢复"
-    fi
+    gclient sync || sync_exit_code=$?
 
     if [ $sync_exit_code -eq 0 ]; then
         log_success "gclient sync 完成"
@@ -515,7 +579,11 @@ main() {
         echo
     fi
 
-    # 4. 显示摘要
+    # 4. 恢复目标版本的编译缓存
+    restore_out_cache "$VERSION"
+    echo
+
+    # 5. 显示摘要
     show_summary "$VERSION"
 }
 

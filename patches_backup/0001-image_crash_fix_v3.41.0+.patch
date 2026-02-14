@@ -1,0 +1,224 @@
+From ed9c307e06d7fba6538c0a4b65d07eedee4002b7 Mon Sep 17 00:00:00 2001
+From: amei714 <amei714@xxxx.xx>
+Date: Sat, 14 Feb 2026 17:45:10 +0800
+Subject: [PATCH] image_crash_fix
+
+Applied patches:
+  - 0001-image_crash_fix.patch
+---
+ engine/src/flutter/shell/common/shell.cc      |  6 ++++
+ .../android/image_external_texture.cc         | 28 ++++++++++++++++++-
+ .../android/image_external_texture_gl.cc      | 15 ++++++++++
+ .../image_external_texture_vk_impeller.cc     | 22 +++++++++++++++
+ .../android/platform_view_android_jni_impl.cc | 21 ++++++++++++--
+ 5 files changed, 89 insertions(+), 3 deletions(-)
+
+diff --git a/engine/src/flutter/shell/common/shell.cc b/engine/src/flutter/shell/common/shell.cc
+index 762663b061d..d1e9f11ce74 100644
+--- a/engine/src/flutter/shell/common/shell.cc
++++ b/engine/src/flutter/shell/common/shell.cc
+@@ -32,6 +32,7 @@
+ #include "flutter/shell/common/skia_event_tracer_impl.h"
+ #include "flutter/shell/common/switches.h"
+ #include "flutter/shell/common/vsync_waiter.h"
++#include "flutter/shell/version/version.h"
+ #include "impeller/renderer/pipeline_library.h"
+ #include "rapidjson/stringbuffer.h"
+ #include "rapidjson/writer.h"
+@@ -522,6 +523,11 @@ Shell::Shell(DartVMRef vm,
+       is_gpu_disabled_sync_switch_(new fml::SyncSwitch(is_gpu_disabled)),
+       weak_factory_gpu_(nullptr),
+       weak_factory_(this) {
++  FML_LOG(ERROR) << ">>>>>>>>>> a888 <<<<<<<<<<";
++  FML_LOG(ERROR) << ">>>>>>>>>> v: " << GetFlutterEngineVersion()
++                 << " <<<<<<<<<<";
++  FML_LOG(ERROR) << ">>>>>>>>>> t: " << __DATE__ << " " << __TIME__
++                 << " <<<<<<<<<<";
+   FML_CHECK(!settings.enable_software_rendering || !settings.enable_impeller)
+       << "Software rendering is incompatible with Impeller.";
+   if (!settings.enable_impeller && settings.warn_on_impeller_opt_out) {
+diff --git a/engine/src/flutter/shell/platform/android/image_external_texture.cc b/engine/src/flutter/shell/platform/android/image_external_texture.cc
+index 4b8ea52c9ac..856ac34ad3f 100644
+--- a/engine/src/flutter/shell/platform/android/image_external_texture.cc
++++ b/engine/src/flutter/shell/platform/android/image_external_texture.cc
+@@ -125,9 +125,35 @@ AHardwareBuffer* ImageExternalTexture::AHardwareBufferFor(
+     const fml::jni::JavaRef<jobject>& hardware_buffer) {
+   JNIEnv* env = fml::jni::AttachCurrentThread();
+   FML_CHECK(env != nullptr);
++
++  if (hardware_buffer.obj() == nullptr) {
++    FML_LOG(WARNING)
++        << "[ImageTexture] HardwareBuffer is null, returning nullptr";
++    return nullptr;
++  }
++
+   const auto& proc =
+       impeller::android::GetProcTable().AHardwareBuffer_fromHardwareBuffer;
+-  return proc ? proc(env, hardware_buffer.obj()) : nullptr;
++  if (!proc) {
++    FML_LOG(WARNING) << "[ImageTexture] AHardwareBuffer_fromHardwareBuffer "
++                        "proc not available";
++    return nullptr;
++  }
++
++  fml::jni::ClearException(env, true);
++
++  AHardwareBuffer* result = proc(env, hardware_buffer.obj());
++
++  if (fml::jni::HasException(env)) {
++    FML_LOG(ERROR) << "[ImageTexture] Failed to get native hardware buffer "
++                      "from Java object, "
++                   << "likely the HardwareBuffer has been closed. Returning "
++                      "null instead of crashing.";
++    fml::jni::ClearException(env, true);
++    return nullptr;
++  }
++
++  return result;
+ }
+ 
+ }  // namespace flutter
+diff --git a/engine/src/flutter/shell/platform/android/image_external_texture_gl.cc b/engine/src/flutter/shell/platform/android/image_external_texture_gl.cc
+index 21cf09ae59e..78f10f5fbb1 100644
+--- a/engine/src/flutter/shell/platform/android/image_external_texture_gl.cc
++++ b/engine/src/flutter/shell/platform/android/image_external_texture_gl.cc
+@@ -45,6 +45,13 @@ void ImageExternalTextureGL::UpdateImage(JavaLocalRef& hardware_buffer,
+                                          const SkRect& bounds,
+                                          PaintContext& context) {
+   AHardwareBuffer* latest_hardware_buffer = AHardwareBufferFor(hardware_buffer);
++
++  if (latest_hardware_buffer == nullptr) {
++    FML_LOG(WARNING) << "[ImageTexture] Failed to get valid AHardwareBuffer, "
++                        "skipping frame update";
++    return;
++  }
++
+   std::optional<HardwareBufferKey> key =
+       impeller::android::HardwareBuffer::GetSystemUniqueID(
+           latest_hardware_buffer);
+@@ -72,8 +79,16 @@ void ImageExternalTextureGL::ProcessFrame(PaintContext& context,
+     return;
+   }
+   JavaLocalRef hardware_buffer = HardwareBufferFor(image);
++  if (hardware_buffer.is_null()) {
++    FML_LOG(WARNING) << "[ImageTexture] Failed to get HardwareBuffer from "
++                        "Image, skipping frame";
++    CloseImage(image);
++    return;
++  }
++
+   UpdateImage(hardware_buffer, bounds, context);
+   CloseHardwareBuffer(hardware_buffer);
++  CloseImage(image);
+ }
+ 
+ void ImageExternalTextureGL::Detach() {
+diff --git a/engine/src/flutter/shell/platform/android/image_external_texture_vk_impeller.cc b/engine/src/flutter/shell/platform/android/image_external_texture_vk_impeller.cc
+index 557cc19402b..2dc742faf1b 100644
+--- a/engine/src/flutter/shell/platform/android/image_external_texture_vk_impeller.cc
++++ b/engine/src/flutter/shell/platform/android/image_external_texture_vk_impeller.cc
+@@ -43,8 +43,23 @@ void ImageExternalTextureVKImpeller::ProcessFrame(PaintContext& context,
+     return;
+   }
+   JavaLocalRef hardware_buffer = HardwareBufferFor(image);
++  if (hardware_buffer.is_null()) {
++    FML_LOG(WARNING) << "[ImageTexture] Failed to get HardwareBuffer from "
++                        "Image, skipping frame";
++    CloseImage(image);
++    return;
++  }
++
+   AHardwareBuffer* latest_hardware_buffer = AHardwareBufferFor(hardware_buffer);
+ 
++  if (latest_hardware_buffer == nullptr) {
++    FML_LOG(WARNING) << "[ImageTexture] Failed to get valid AHardwareBuffer, "
++                        "skipping frame update";
++    CloseHardwareBuffer(hardware_buffer);
++    CloseImage(image);
++    return;
++  }
++
+   auto hb_desc =
+       impeller::android::HardwareBuffer::Describe(latest_hardware_buffer);
+   std::optional<HardwareBufferKey> key =
+@@ -55,6 +70,7 @@ void ImageExternalTextureVKImpeller::ProcessFrame(PaintContext& context,
+     dl_image_ = existing_image;
+ 
+     CloseHardwareBuffer(hardware_buffer);
++    CloseImage(image);
+     return;
+   }
+ 
+@@ -62,6 +78,7 @@ void ImageExternalTextureVKImpeller::ProcessFrame(PaintContext& context,
+       impeller_context_, latest_hardware_buffer, hb_desc.value());
+   if (!texture_source->IsValid()) {
+     CloseHardwareBuffer(hardware_buffer);
++    CloseImage(image);
+     return;
+   }
+ 
+@@ -86,9 +103,13 @@ void ImageExternalTextureVKImpeller::ProcessFrame(PaintContext& context,
+     barrier.new_layout = impeller::vk::ImageLayout::eShaderReadOnlyOptimal;
+ 
+     if (!texture->SetLayout(barrier)) {
++      CloseHardwareBuffer(hardware_buffer);
++      CloseImage(image);
+       return;
+     }
+     if (!impeller_context_->GetCommandQueue()->Submit({buffer}).ok()) {
++      CloseHardwareBuffer(hardware_buffer);
++      CloseImage(image);
+       return;
+     }
+   }
+@@ -98,6 +119,7 @@ void ImageExternalTextureVKImpeller::ProcessFrame(PaintContext& context,
+     image_lru_.AddImage(dl_image_, key.value());
+   }
+   CloseHardwareBuffer(hardware_buffer);
++  CloseImage(image);
+ }
+ 
+ }  // namespace flutter
+diff --git a/engine/src/flutter/shell/platform/android/platform_view_android_jni_impl.cc b/engine/src/flutter/shell/platform/android/platform_view_android_jni_impl.cc
+index 1c67261fdc1..17ba575b9b7 100644
+--- a/engine/src/flutter/shell/platform/android/platform_view_android_jni_impl.cc
++++ b/engine/src/flutter/shell/platform/android/platform_view_android_jni_impl.cc
+@@ -1677,16 +1677,33 @@ PlatformViewAndroidJNIImpl::ImageProducerTextureEntryAcquireLatestImage(
+ 
+ JavaLocalRef PlatformViewAndroidJNIImpl::ImageGetHardwareBuffer(
+     JavaLocalRef image) {
+-  FML_CHECK(g_image_get_hardware_buffer_method != nullptr);
++  if (g_image_get_hardware_buffer_method == nullptr) {
++    FML_LOG(WARNING) << "[ImageTexture] getHardwareBuffer method not available "
++                        "(requires API > 29). Returning null.";
++    return JavaLocalRef();
++  }
+   JNIEnv* env = fml::jni::AttachCurrentThread();
+   if (image.is_null()) {
+     // Return null.
+     return JavaLocalRef();
+   }
++
++  // Clear any pending exceptions
++  fml::jni::ClearException(env, true);
++
+   JavaLocalRef r = JavaLocalRef(
+       env,
+       env->CallObjectMethod(image.obj(), g_image_get_hardware_buffer_method));
+-  FML_CHECK(fml::jni::CheckException(env));
++
++  // Gracefully check for exceptions instead of crashing
++  if (fml::jni::HasException(env)) {
++    FML_LOG(ERROR) << "[ImageTexture] Failed to get HardwareBuffer from Image, "
++                      "likely already closed. "
++                   << "Returning null instead of crashing.";
++    fml::jni::ClearException(env, true);
++    return JavaLocalRef();  // Return null instead of crashing
++  }
++
+   return r;
+ }
+ 
+-- 
+2.50.1 (Apple Git-155)
+
