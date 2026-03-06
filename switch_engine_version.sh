@@ -474,33 +474,25 @@ clean_snapshot_artifacts() {
 
     log_step "清理旧的 snapshot 产物（避免 Invalid SDK hash 错误）..."
 
-    # SDK hash 依赖链较长（gen_snapshot、frontend_server、platform_strong.dill、
-    # vmservice kernel 等），逐个清理容易遗漏。直接清理 gen/ 目录、host 工具链
-    # 目录和 flutter_patched_sdk/，确保所有带 SDK hash 的产物全部重建。
-    # libflutter.so 等 C++ 编译产物不受影响，不会被清理。
+    # args.gn 含 dart_sdk_verification_hash，切换版本后该 hash 会过期。
+    # 删除 args.gn 和 build.ninja 强制 gn gen 重新生成正确的 hash，
+    # ninja 会自动重建所有受影响的产物（gen_snapshot、platform_strong.dill 等）。
+    # C++ 编译产物（obj/、libflutter.so）不受影响，仍然增量编译。
     local cleaned=0
     for config_dir in "$out_dir"/android_*; do
         [ -d "$config_dir" ] || continue
         local config_name=$(basename "$config_dir")
 
-        if [ -d "$config_dir/gen" ] || [ -d "$config_dir/flutter_patched_sdk" ] || [ -f "$config_dir/args.gn" ]; then
-            log_info "清理 ${config_name} 的 Dart SDK 相关产物..."
-            # args.gn 含旧的 dart_sdk_verification_hash，必须删除以强制重新 gn gen
+        if [ -f "$config_dir/args.gn" ]; then
+            log_info "清理 ${config_name} 的 GN 配置（强制重新 gn gen）..."
             rm -f "$config_dir/args.gn" 2>/dev/null
             rm -f "$config_dir/build.ninja" 2>/dev/null
-            rm -rf "$config_dir/gen" 2>/dev/null
-            rm -rf "$config_dir/flutter_patched_sdk" 2>/dev/null
-            rm -rf "$config_dir/clang_arm64/gen" 2>/dev/null
-            rm -rf "$config_dir/clang_arm64/gen_snapshot" 2>/dev/null
-            rm -rf "$config_dir/clang_x64/gen" 2>/dev/null
-            rm -rf "$config_dir/clang_x64/gen_snapshot" 2>/dev/null
-            rm -rf "$config_dir/universal/gen_snapshot" 2>/dev/null
             ((cleaned++))
         fi
     done
 
     if [ $cleaned -gt 0 ]; then
-        log_success "已清理 ${cleaned} 个构建目录的 Dart SDK 相关产物"
+        log_success "已清理 ${cleaned} 个构建目录的 GN 配置，下次编译将自动重新生成"
     else
         log_info "没有需要清理的产物"
     fi
