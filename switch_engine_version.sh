@@ -4,11 +4,12 @@
 # 切换引擎到指定版本，并自动应用 patches_backup 目录中的补丁
 #
 # 用法:
-#   ./switch_engine_version.sh <版本号>               # 切换版本 + 应用补丁 + gclient sync
-#   ./switch_engine_version.sh <版本号> --no-sync      # 切换版本 + 应用补丁，跳过 gclient sync
-#   ./switch_engine_version.sh <版本号> --sync-only     # 仅运行 gclient sync（已切换过版本时）
-#   ./switch_engine_version.sh --list                   # 列出可用的稳定版本
-#   ./switch_engine_version.sh --current                # 显示当前版本信息
+#   ./switch_engine_version.sh <版本号>                     # 切换版本 + 应用补丁 + gclient sync
+#   ./switch_engine_version.sh <版本号> --no-sync            # 切换版本 + 应用补丁，跳过 gclient sync
+#   ./switch_engine_version.sh <版本号> --clean-snapshot     # 切换版本 + 清理旧 snapshot 产物
+#   ./switch_engine_version.sh <版本号> --sync-only          # 仅运行 gclient sync（已切换过版本时）
+#   ./switch_engine_version.sh --list                        # 列出可用的稳定版本
+#   ./switch_engine_version.sh --current                     # 显示当前版本信息
 
 set -e
 
@@ -32,6 +33,7 @@ SHOW_CURRENT=false
 BRANCH_SUFFIX="image_crash"
 SKIP_PATCHES=false
 GCLIENT_DELETE=false
+CLEAN_SNAPSHOT=false
 
 # 颜色输出
 RED='\033[0;31m'
@@ -62,16 +64,18 @@ Flutter Engine 版本切换脚本 v${SCRIPT_VERSION}
   --no-sync                 跳过 gclient sync
   --sync-only               仅运行 gclient sync（版本已切换时使用）
   -D                        gclient sync 时删除无用依赖目录（默认不删）
+  --clean-snapshot, -C      清理旧的 snapshot 产物（解决 Invalid SDK hash 错误）
   --suffix SUFFIX           自定义分支后缀 (默认: ${BRANCH_SUFFIX})
   --list, -l                列出可用的稳定版本
   --current, -c             显示当前版本信息
   --help, -h                显示此帮助信息
 
 示例:
-  $0 3.38.9                 # 切换到 3.38.9 并应用补丁
-  $0 3.38.9 --no-sync       # 切换但不运行 gclient sync
-  $0 --list                 # 列出所有可用稳定版本
-  $0 --current              # 查看当前版本
+  $0 3.38.9                       # 切换到 3.38.9 并应用补丁
+  $0 3.38.9 --no-sync             # 切换但不运行 gclient sync
+  $0 3.38.9 --clean-snapshot      # 切换并清理旧 snapshot 产物
+  $0 --list                       # 列出所有可用稳定版本
+  $0 --current                    # 查看当前版本
 
 工作流程:
   1. 检查版本 tag 是否存在
@@ -106,6 +110,11 @@ parse_args() {
             -D)
                 GCLIENT_DELETE=true
                 log_info "已启用 gclient sync -D 选项"
+                shift
+                ;;
+            --clean-snapshot|-C)
+                CLEAN_SNAPSHOT=true
+                log_info "已启用清理 snapshot 产物选项"
                 shift
                 ;;
             --list|-l)
@@ -454,6 +463,49 @@ run_gclient_sync() {
     fi
 }
 
+# 清理旧的 snapshot 产物（解决 Invalid SDK hash 问题）
+clean_snapshot_artifacts() {
+    local out_dir="${ENGINE_SRC}/out"
+
+    if [ ! -d "$out_dir" ]; then
+        log_info "out 目录不存在，无需清理"
+        return 0
+    fi
+
+    log_step "清理旧的 snapshot 产物（避免 Invalid SDK hash 错误）..."
+
+    # SDK hash 依赖链较长（gen_snapshot、frontend_server、platform_strong.dill、
+    # vmservice kernel 等），逐个清理容易遗漏。直接清理 gen/ 目录、host 工具链
+    # 目录和 flutter_patched_sdk/，确保所有带 SDK hash 的产物全部重建。
+    # libflutter.so 等 C++ 编译产物不受影响，不会被清理。
+    local cleaned=0
+    for config_dir in "$out_dir"/android_*; do
+        [ -d "$config_dir" ] || continue
+        local config_name=$(basename "$config_dir")
+
+        if [ -d "$config_dir/gen" ] || [ -d "$config_dir/flutter_patched_sdk" ] || [ -f "$config_dir/args.gn" ]; then
+            log_info "清理 ${config_name} 的 Dart SDK 相关产物..."
+            # args.gn 含旧的 dart_sdk_verification_hash，必须删除以强制重新 gn gen
+            rm -f "$config_dir/args.gn" 2>/dev/null
+            rm -f "$config_dir/build.ninja" 2>/dev/null
+            rm -rf "$config_dir/gen" 2>/dev/null
+            rm -rf "$config_dir/flutter_patched_sdk" 2>/dev/null
+            rm -rf "$config_dir/clang_arm64/gen" 2>/dev/null
+            rm -rf "$config_dir/clang_arm64/gen_snapshot" 2>/dev/null
+            rm -rf "$config_dir/clang_x64/gen" 2>/dev/null
+            rm -rf "$config_dir/clang_x64/gen_snapshot" 2>/dev/null
+            rm -rf "$config_dir/universal/gen_snapshot" 2>/dev/null
+            ((cleaned++))
+        fi
+    done
+
+    if [ $cleaned -gt 0 ]; then
+        log_success "已清理 ${cleaned} 个构建目录的 Dart SDK 相关产物"
+    else
+        log_info "没有需要清理的产物"
+    fi
+}
+
 # 显示完成摘要
 show_summary() {
     local version="$1"
@@ -545,7 +597,13 @@ main() {
         echo
     fi
 
-    # 4. 显示摘要
+    # 4. 清理 snapshot 产物
+    if [ "$CLEAN_SNAPSHOT" = "true" ]; then
+        clean_snapshot_artifacts
+        echo
+    fi
+
+    # 5. 显示摘要
     show_summary "$VERSION"
 }
 
