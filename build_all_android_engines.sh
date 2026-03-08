@@ -8,6 +8,8 @@ set -e  # 遇到错误立即退出
 
 # 路径配置
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+DEPOT_TOOLS="${SCRIPT_DIR}/depot_tools"
+export PATH="${DEPOT_TOOLS}:${PATH}"
 cd "$SCRIPT_DIR"
 
 # 编译模式选项 - 默认启用增量编译
