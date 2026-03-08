@@ -480,24 +480,69 @@ run_gclient_sync() {
         log_info "已启用 -D 参数（删除无用依赖目录）"
     fi
 
-    log_info "执行: gclient sync ${sync_args}"
-    local sync_exit_code=0
-    gclient sync $sync_args || sync_exit_code=$?
+    local max_retries=1
+    local attempt=0
+    local sync_log="${UNIFIED_REPO}/_gclient_sync.log"
 
-    if [ $sync_exit_code -eq 0 ]; then
-        log_success "gclient sync 完成"
-    else
-        # gclient sync 有 WARNING 时也会返回非零，检查关键产物判断是否真的失败
-        if [ -f "${ENGINE_SRC}/flutter/tools/gn" ]; then
-            log_warning "gclient sync 有警告 (exit code: ${sync_exit_code})，但关键文件存在，继续执行"
-        else
-            log_error "gclient sync 失败 (exit code: ${sync_exit_code})"
-            log_info "可以稍后手动运行:"
-            log_info "  export PATH=${DEPOT_TOOLS}:\$PATH"
-            log_info "  cd ${UNIFIED_REPO} && gclient sync"
-            return 1
+    while [ $attempt -le $max_retries ]; do
+        if [ $attempt -gt 0 ]; then
+            log_warning "gclient sync 检测到错误，等待 10 秒后重试 (第 ${attempt} 次重试)..."
+            sleep 10
         fi
-    fi
+
+        log_info "执行: gclient sync ${sync_args}"
+        local sync_exit_code=0
+        gclient sync $sync_args 2>&1 | tee "$sync_log" || sync_exit_code=${PIPESTATUS[0]}
+
+        # 检查输出中是否有失败标记（gclient 即使部分失败也可能返回 0）
+        local has_errors=false
+        if grep -qiE '\(ERROR\)|fatal:|returned non-zero exit status' "$sync_log" 2>/dev/null; then
+            has_errors=true
+        fi
+
+        if [ $sync_exit_code -eq 0 ] && [ "$has_errors" = "false" ]; then
+            log_success "gclient sync 完成"
+            rm -f "$sync_log"
+            return 0
+        fi
+
+        # 有错误但关键文件存在 → 大部分依赖已就绪
+        if [ "$has_errors" = "true" ] && [ $sync_exit_code -eq 0 ] && [ -f "${ENGINE_SRC}/flutter/tools/gn" ]; then
+            # 还有重试机会，继续重试
+            if [ $attempt -lt $max_retries ]; then
+                log_warning "gclient sync 部分依赖下载失败，将自动重试"
+                ((attempt++))
+                continue
+            fi
+            # 重试机会用完，检查关键文件
+            log_warning "gclient sync 部分依赖可能未完整下载，但关键文件存在，继续执行"
+            rm -f "$sync_log"
+            return 0
+        fi
+
+        # exit code 非零 + 关键文件存在 → 只是 warning
+        if [ $sync_exit_code -ne 0 ] && [ -f "${ENGINE_SRC}/flutter/tools/gn" ]; then
+            if [ $attempt -lt $max_retries ]; then
+                ((attempt++))
+                continue
+            fi
+            log_warning "gclient sync 有警告 (exit code: ${sync_exit_code})，但关键文件存在，继续执行"
+            rm -f "$sync_log"
+            return 0
+        fi
+
+        # 真正失败，进入下一轮重试
+        log_warning "gclient sync 失败 (exit code: ${sync_exit_code})"
+        ((attempt++))
+    done
+
+    # 重试耗尽
+    rm -f "$sync_log"
+    log_error "gclient sync 重试后仍失败"
+    log_info "可以稍后手动运行:"
+    log_info "  export PATH=${DEPOT_TOOLS}:\$PATH"
+    log_info "  cd ${UNIFIED_REPO} && gclient sync"
+    return 1
 }
 
 # 清理旧的 snapshot 产物（解决 Invalid SDK hash 问题）
