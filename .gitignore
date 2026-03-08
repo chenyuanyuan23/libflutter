@@ -1,2 +1,8 @@
 # 临时目录
 _temp/
+
+# Flutter 引擎编译相关（自动克隆/创建）
+flutter_unified_repo/
+depot_tools/
+.engine_version_cache
+.claude/settings.local.json
