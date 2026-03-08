@@ -161,11 +161,10 @@ check_environment() {
         git clone https://github.com/flutter/flutter.git "$UNIFIED_REPO"
         log_success "Flutter SDK 仓库克隆完成"
 
-        # 复制 .gclient 配置（Flutter 仓库自带模板）
+        # 创建 .gclient 配置
         if [ -f "$UNIFIED_REPO/.gclient" ]; then
             log_info ".gclient 配置已存在"
         else
-            # 使用 Flutter 仓库标准 .gclient 配置
             cat > "$UNIFIED_REPO/.gclient" << 'GCLIENT_EOF'
 solutions = [
   {

@@ -1,8 +1,8 @@
 #!/bin/bash
 
 # Flutter Engine Android 平台编译脚本
-# 编译所有Android平台版本，输出目录名称与Flutter SDK一致
-# 默认启用增量编译以提高编译速度
+# 编译所有 Android 平台版本 (arm/arm64 的 profile + release)
+# 默认启用增量编译，支持并行 ninja 编译
 
 set -e  # 遇到错误立即退出
 
@@ -140,7 +140,7 @@ show_help() {
 
 # 检查是否在正确的目录
 if [ ! -f "flutter_unified_repo/engine/src/flutter/tools/gn" ] && [ ! -f "flutter/tools/gn" ]; then
-    log_error "请确保 flutter_engine_dev 根目录下存在 flutter_unified_repo 或在 engine/src 目录下运行"
+    log_error "请确保 libflutter 目录下存在 flutter_unified_repo 或在 engine/src 目录下运行"
     exit 1
 fi
 

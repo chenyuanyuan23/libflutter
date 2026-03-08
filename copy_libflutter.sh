@@ -1,7 +1,7 @@
 #!/bin/bash
 
 # Flutter Engine libflutter.so 复制并压缩脚本
-# 直接从编译输出目录复制 libflutter.so 文件，按版本号和平台组织，并压缩为zip格式
+# 从 flutter_unified_repo/engine/src/out/ 复制 libflutter.so，按版本号和平台组织并压缩为 zip
 # 使用方法: ./copy_libflutter.sh [选项]
 
 set -e  # 遇到错误立即退出
