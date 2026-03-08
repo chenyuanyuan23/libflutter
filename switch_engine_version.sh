@@ -5,6 +5,7 @@
 #
 # 用法:
 #   ./switch_engine_version.sh <版本号>                     # 切换版本 + 应用补丁 + gclient sync
+#   ./switch_engine_version.sh --latest                      # 自动切换到最新稳定版本
 #   ./switch_engine_version.sh <版本号> --no-sync            # 切换版本 + 应用补丁，跳过 gclient sync
 #   ./switch_engine_version.sh <版本号> --clean-snapshot     # 切换版本 + 清理旧 snapshot 产物
 #   ./switch_engine_version.sh <版本号> --sync-only          # 仅运行 gclient sync（已切换过版本时）
@@ -33,6 +34,7 @@ BRANCH_SUFFIX="image_crash"
 SKIP_PATCHES=false
 GCLIENT_DELETE=false
 CLEAN_SNAPSHOT=false
+USE_LATEST=false
 
 # 颜色输出
 RED='\033[0;31m'
@@ -60,6 +62,7 @@ Flutter Engine 版本切换脚本 v${SCRIPT_VERSION}
   版本号                    要切换的 Flutter 版本 (如: 3.38.9)
 
 选项:
+  --latest, -L              自动切换到最新稳定版本（无需指定版本号）
   --no-sync                 跳过 gclient sync
   --sync-only               仅运行 gclient sync（版本已切换时使用）
   -D                        gclient sync 时删除无用依赖目录（默认不删）
@@ -71,6 +74,7 @@ Flutter Engine 版本切换脚本 v${SCRIPT_VERSION}
 
 示例:
   $0 3.38.9                       # 切换到 3.38.9 并应用补丁
+  $0 --latest                     # 自动切换到最新稳定版本
   $0 3.38.9 --no-sync             # 切换但不运行 gclient sync
   $0 3.38.9 --clean-snapshot      # 切换并清理旧 snapshot 产物
   $0 --list                       # 列出所有可用稳定版本
@@ -114,6 +118,10 @@ parse_args() {
             --clean-snapshot|-C)
                 CLEAN_SNAPSHOT=true
                 log_info "已启用清理 snapshot 产物选项"
+                shift
+                ;;
+            --latest|-L)
+                USE_LATEST=true
                 shift
                 ;;
             --list|-l)
@@ -274,6 +282,57 @@ show_current() {
     else
         echo "    (无补丁文件)"
     fi
+}
+
+# 获取最新稳定版本号
+resolve_latest_version() {
+    log_info "正在获取 Flutter 最新 stable 版本..." >&2
+
+    local latest=""
+
+    # 方法1: 使用 fvm releases 获取（从 Channel 汇总表提取 stable 版本）
+    if command -v fvm &>/dev/null; then
+        local fvm_output
+        fvm_output=$(fvm releases 2>/dev/null)
+        latest=$(echo "$fvm_output" | awk '/^Channel:$/,0' | grep -i "stable" | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" | head -1)
+        if [ -n "$latest" ]; then
+            log_info "从 fvm releases 获取到最新版本" >&2
+        fi
+    fi
+
+    # 方法2: 从 Flutter 官方 API 获取
+    if [ -z "$latest" ]; then
+        log_info "尝试从 Flutter 官方 API 获取版本信息..." >&2
+        local stable_hash
+        stable_hash=$(curl -s https://storage.googleapis.com/flutter_infra_release/releases/releases_macos.json 2>/dev/null \
+            | grep -oE '"current_release"[^}]+' \
+            | grep -oE '"stable"\s*:\s*"[^"]+"' \
+            | grep -oE '[a-f0-9]{32,}' \
+            | head -1)
+
+        if [ -n "$stable_hash" ]; then
+            latest=$(curl -s https://storage.googleapis.com/flutter_infra_release/releases/releases_macos.json 2>/dev/null \
+                | grep -oE "\"hash\":\s*\"${stable_hash}\"[^}]+\"version\":\s*\"[^\"]+\"" \
+                | grep -oE '"version":\s*"[^"]+"' \
+                | grep -oE "[0-9]+\.[0-9]+\.[0-9]+" \
+                | head -1)
+        fi
+    fi
+
+    # 方法3: 从本地 git tags 获取（fallback）
+    if [ -z "$latest" ] && [ -d "$UNIFIED_REPO/.git" ]; then
+        log_info "尝试从本地 git tags 获取..." >&2
+        cd "$UNIFIED_REPO"
+        git fetch origin --tags --quiet 2>/dev/null || true
+        latest=$(git tag -l "[0-9]*" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V | tail -1)
+    fi
+
+    if [ -z "$latest" ]; then
+        log_error "无法获取最新版本号，请检查网络连接" >&2
+        exit 1
+    fi
+
+    echo "$latest"
 }
 
 # 切换版本
@@ -627,6 +686,12 @@ main() {
     if [ "$SHOW_CURRENT" = "true" ]; then
         show_current
         exit 0
+    fi
+
+    # 自动获取最新版本
+    if [ "$USE_LATEST" = "true" ]; then
+        VERSION=$(resolve_latest_version)
+        log_success "最新稳定版本: ${VERSION}"
     fi
 
     # 仅同步模式
