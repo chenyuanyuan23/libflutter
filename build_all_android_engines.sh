@@ -8,8 +8,7 @@ set -e  # 遇到错误立即退出
 
 # 路径配置
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-cd "$ROOT_DIR"
+cd "$SCRIPT_DIR"
 
 # 编译模式选项 - 默认启用增量编译
 INCREMENTAL_BUILD=true   # 默认启用增量编译

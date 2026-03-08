@@ -18,11 +18,13 @@ SCRIPT_VERSION="1.0.0"
 
 # 路径配置
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
-ROOT_DIR="$(cd "${SCRIPT_DIR}/.." && pwd)"
-UNIFIED_REPO="${ROOT_DIR}/flutter_unified_repo"
-ENGINE_SRC="${UNIFIED_REPO}/engine/src"
+UNIFIED_REPO="${SCRIPT_DIR}/flutter_unified_repo"
+GCLIENT_DIR="${UNIFIED_REPO}/engine"
+ENGINE_SRC="${GCLIENT_DIR}/src"
+ENGINE_REPO="${ENGINE_SRC}/flutter"
 PATCHES_DIR="${SCRIPT_DIR}/patches_backup"
-DEPOT_TOOLS="${ROOT_DIR}/depot_tools"
+DEPOT_TOOLS="${SCRIPT_DIR}/depot_tools"
+VERSION_CACHE="${SCRIPT_DIR}/.engine_version_cache"
 
 # 选项
 VERSION=""
@@ -147,34 +149,93 @@ parse_args() {
     done
 }
 
-# 检查环境
+# 检查环境，不存在时自动创建
 check_environment() {
-    if [ ! -d "$UNIFIED_REPO" ]; then
-        log_error "flutter_unified_repo 目录不存在: $UNIFIED_REPO"
-        exit 1
-    fi
-
-    if [ ! -d "$PATCHES_DIR" ]; then
-        log_error "patches_backup 目录不存在: $PATCHES_DIR"
-        exit 1
-    fi
-
+    # depot_tools 不存在时自动克隆
     if [ ! -d "$DEPOT_TOOLS" ]; then
-        log_warning "depot_tools 目录不存在: $DEPOT_TOOLS"
-        log_warning "gclient sync 可能无法运行"
+        log_info "depot_tools 不存在，正在克隆..."
+        git clone https://chromium.googlesource.com/chromium/tools/depot_tools.git "$DEPOT_TOOLS"
+        log_success "depot_tools 克隆完成"
+    fi
+
+    # flutter_unified_repo 不存在时自动创建并配置 .gclient
+    if [ ! -d "$UNIFIED_REPO" ] || [ ! -d "$ENGINE_REPO" ]; then
+        log_info "引擎代码不存在，正在初始化..."
+        mkdir -p "$GCLIENT_DIR"
+
+        cat > "$GCLIENT_DIR/.gclient" << 'GCLIENT_EOF'
+solutions = [
+  {
+    "managed": False,
+    "name": "src/flutter",
+    "url": "https://github.com/flutter/engine.git",
+    "custom_deps": {},
+    "deps_file": "DEPS",
+    "safesync_url": "",
+  },
+]
+GCLIENT_EOF
+
+        log_success "已创建 .gclient 配置"
+
+        # 自动运行 gclient sync 初始化引擎代码
+        log_step "首次初始化，正在运行 gclient sync (可能需要较长时间)..."
+        export PATH="${DEPOT_TOOLS}:${PATH}"
+        cd "$GCLIENT_DIR"
+        gclient sync || {
+            log_error "gclient sync 失败，请检查网络连接后手动运行:"
+            log_info "  export PATH=${DEPOT_TOOLS}:\$PATH"
+            log_info "  cd ${GCLIENT_DIR} && gclient sync"
+            exit 1
+        }
+        cd "$SCRIPT_DIR"
+        log_success "引擎代码初始化完成"
+    fi
+
+    # patches_backup 不存在时自动创建
+    if [ ! -d "$PATCHES_DIR" ]; then
+        log_info "patches_backup 目录不存在，正在创建..."
+        mkdir -p "$PATCHES_DIR"
+        log_warning "patches_backup 目录为空，请将补丁文件放入: $PATCHES_DIR"
     fi
 }
 
-# 列出可用的稳定版本
+# 通过 Flutter SDK 版本号获取 engine commit hash
+# 优先从本地缓存读取，未命中则从 GitHub 查询并缓存
+resolve_engine_commit() {
+    local sdk_version="$1"
+
+    # 1. 查本地缓存
+    if [ -f "$VERSION_CACHE" ]; then
+        local cached
+        cached=$(grep "^${sdk_version}=" "$VERSION_CACHE" 2>/dev/null | head -1 | cut -d= -f2)
+        if [ -n "$cached" ]; then
+            log_info "从本地缓存获取 engine commit" >&2
+            echo "$cached"
+            return 0
+        fi
+    fi
+
+    # 2. 从 GitHub 查询
+    log_info "从 GitHub 查询 Flutter SDK ${sdk_version} 对应的 engine commit..." >&2
+    local url="https://raw.githubusercontent.com/flutter/flutter/${sdk_version}/bin/internal/engine.version"
+    local commit_hash
+    commit_hash=$(curl -sS --fail "$url" 2>/dev/null | tr -d '[:space:]')
+
+    if [ -z "$commit_hash" ]; then
+        return 1
+    fi
+
+    # 3. 写入缓存
+    echo "${sdk_version}=${commit_hash}" >> "$VERSION_CACHE"
+    log_info "已缓存版本映射" >&2
+
+    echo "$commit_hash"
+}
+
+# 列出可用的稳定版本（显示已创建补丁分支的版本）
 list_versions() {
-    log_info "可用的稳定版本 (不含 pre-release):"
-    echo
-
-    cd "$UNIFIED_REPO"
-
-    # 获取所有稳定版本 tag（排除 pre-release）
-    local versions
-    versions=$(git tag -l "[0-9]*" | grep -E '^[0-9]+\.[0-9]+\.[0-9]+$' | sort -V)
+    cd "$ENGINE_REPO"
 
     # 获取当前分支
     local current_branch
@@ -182,28 +243,31 @@ list_versions() {
 
     # 获取已有的自定义分支
     local custom_branches
-    custom_branches=$(git branch | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-' | sed 's/-$//' || true)
-
-    for v in $versions; do
-        local marker=""
-        # 检查是否有对应的自定义分支
-        if echo "$custom_branches" | grep -q "^${v}$"; then
-            marker=" ${GREEN}(已应用补丁)${NC}"
-        fi
-        # 检查是否是当前版本
-        if [[ "$current_branch" == "${v}-"* ]]; then
-            marker="${marker} ${CYAN}<-- 当前${NC}"
-        fi
-        printf "  %s${marker}\n" "$v"
-    done
+    custom_branches=$(git branch | grep -oE '[0-9]+\.[0-9]+\.[0-9]+-' | sed 's/-$//' | sort -V || true)
 
     echo
-    log_info "共 $(echo "$versions" | wc -l | tr -d ' ') 个稳定版本"
+    log_info "已有的补丁分支:"
+    if [ -n "$custom_branches" ]; then
+        for v in $custom_branches; do
+            local marker=""
+            if [[ "$current_branch" == "${v}-"* ]]; then
+                marker=" ${CYAN}<-- 当前${NC}"
+            fi
+            printf "  %s ${GREEN}(已应用补丁)${NC}${marker}\n" "$v"
+        done
+    else
+        echo "    (无)"
+    fi
+
+    echo
+    log_info "使用方法: $0 <Flutter SDK 版本号>"
+    log_info "例如: $0 3.38.9"
+    log_info "脚本会自动从 Flutter SDK 仓库查找对应的 engine commit"
 }
 
 # 显示当前版本信息
 show_current() {
-    cd "$UNIFIED_REPO"
+    cd "$ENGINE_REPO"
 
     local current_branch
     current_branch=$(git branch --show-current 2>/dev/null || echo "(detached HEAD)")
@@ -242,21 +306,12 @@ show_current() {
     fi
 }
 
-# 保存当前版本的 out/ 到缓存
 # 切换版本
 switch_version() {
     local version="$1"
     local branch_name="${version}-${BRANCH_SUFFIX}"
 
-    cd "$UNIFIED_REPO"
-
-    # 检查 tag 是否存在
-    if ! git tag -l "$version" | grep -q "^${version}$"; then
-        log_error "版本 tag '${version}' 不存在"
-        log_info "使用 '$0 --list' 查看可用版本"
-        log_info "或尝试先 fetch: cd ${UNIFIED_REPO} && git fetch origin --tags"
-        exit 1
-    fi
+    cd "$ENGINE_REPO"
 
     # 检查分支是否已存在
     if git branch --list "$branch_name" | grep -q "$branch_name"; then
@@ -271,8 +326,7 @@ switch_version() {
         case "$choice" in
             1)
                 log_info "删除旧分支: ${branch_name}"
-                # 先切到 detached HEAD 以便删除分支
-                git checkout "$version" 2>/dev/null || true
+                git checkout HEAD~0 2>/dev/null || true
                 git branch -D "$branch_name"
                 ;;
             2)
@@ -293,9 +347,25 @@ switch_version() {
         esac
     fi
 
-    # checkout 到目标版本
-    log_step "切换到版本 ${version}..."
-    git checkout "$version" 2>/dev/null || {
+    # 通过 Flutter SDK 版本号查找对应的 engine commit
+    log_step "查找 Flutter SDK ${version} 对应的 engine commit..."
+    local engine_commit
+    engine_commit=$(resolve_engine_commit "$version") || {
+        log_error "无法获取 Flutter SDK '${version}' 对应的 engine commit"
+        log_info "请确认版本号正确（Flutter SDK 版本，如 3.38.9）"
+        exit 1
+    }
+    log_info "Engine commit: ${engine_commit}"
+
+    # 确保 engine 仓库有该 commit（可能需要 fetch）
+    if ! git cat-file -e "${engine_commit}^{commit}" 2>/dev/null; then
+        log_info "本地没有该 commit，正在 fetch..."
+        git fetch origin "$engine_commit" 2>/dev/null || git fetch origin
+    fi
+
+    # checkout 到目标 commit
+    log_step "切换到版本 ${version} (${engine_commit:0:12})..."
+    git checkout "$engine_commit" 2>/dev/null || {
         # 忽略 vpython3 等 hook 错误
         true
     }
@@ -348,7 +418,7 @@ select_patches_for_version() {
 
 # 应用补丁
 apply_patches() {
-    cd "$UNIFIED_REPO"
+    cd "$ENGINE_REPO"
 
     # 根据版本选择补丁
     local patches=()
@@ -362,6 +432,8 @@ apply_patches() {
     log_step "应用补丁文件 (共 ${#patches[@]} 个)..."
     echo
 
+    # 补丁路径以 engine/src/flutter/ 开头，使用 -p4 去掉前缀
+    local PATCH_STRIP="-p4"
     local applied=0
     local failed=0
 
@@ -370,8 +442,8 @@ apply_patches() {
         log_info "应用补丁: ${name}"
 
         # 先检查是否能干净应用
-        if git apply --check "$patch" 2>/dev/null; then
-            if git apply "$patch"; then
+        if git apply --check $PATCH_STRIP "$patch" 2>/dev/null; then
+            if git apply $PATCH_STRIP "$patch"; then
                 log_success "  ${name} 应用成功"
                 ((applied++))
             else
@@ -380,13 +452,13 @@ apply_patches() {
             fi
         else
             # 尝试检查是否已经应用过
-            if git apply --check --reverse "$patch" 2>/dev/null; then
+            if git apply --check --reverse $PATCH_STRIP "$patch" 2>/dev/null; then
                 log_warning "  ${name} 已经应用过，跳过"
                 ((applied++))
             else
                 log_error "  ${name} 无法干净应用（可能有冲突）"
                 log_info "  尝试使用 3-way merge..."
-                if git apply --3way "$patch" 2>/dev/null; then
+                if git apply --3way $PATCH_STRIP "$patch" 2>/dev/null; then
                     log_success "  ${name} 通过 3-way merge 应用成功"
                     ((applied++))
                 else
@@ -424,14 +496,14 @@ $(for p in "${patches[@]}"; do echo "  - $(basename "$p")"; done)" 2>/dev/null |
 run_gclient_sync() {
     if [ ! -d "$DEPOT_TOOLS" ]; then
         log_error "depot_tools 不存在，无法运行 gclient sync"
-        log_info "请手动运行: export PATH=${DEPOT_TOOLS}:\$PATH && cd ${ENGINE_SRC} && gclient sync"
+        log_info "请手动运行: export PATH=${DEPOT_TOOLS}:\$PATH && cd ${GCLIENT_DIR} && gclient sync"
         return 1
     fi
 
     export PATH="${DEPOT_TOOLS}:${PATH}"
 
     # gclient sync 需要在 .gclient 所在目录运行
-    cd "$UNIFIED_REPO"
+    cd "$GCLIENT_DIR"
 
     log_step "运行 gclient sync (可能需要较长时间)..."
     log_info "工作目录: $(pwd)"
@@ -457,7 +529,7 @@ run_gclient_sync() {
             log_error "gclient sync 失败 (exit code: ${sync_exit_code})"
             log_info "可以稍后手动运行:"
             log_info "  export PATH=${DEPOT_TOOLS}:\$PATH"
-            log_info "  cd ${UNIFIED_REPO} && gclient sync"
+            log_info "  cd ${GCLIENT_DIR} && gclient sync"
             return 1
         fi
     fi
@@ -503,7 +575,7 @@ show_summary() {
     local version="$1"
     local branch_name="${version}-${BRANCH_SUFFIX}"
 
-    cd "$UNIFIED_REPO"
+    cd "$ENGINE_REPO"
 
     echo
     echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
@@ -518,7 +590,7 @@ show_summary() {
     if [ "$SKIP_SYNC" = "true" ]; then
         log_warning "gclient sync 已跳过，编译前请先运行:"
         log_info "  export PATH=${DEPOT_TOOLS}:\$PATH"
-        log_info "  cd ${UNIFIED_REPO} && gclient sync"
+        log_info "  cd ${GCLIENT_DIR} && gclient sync"
         echo
     fi
 
