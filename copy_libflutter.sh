@@ -166,8 +166,8 @@ detect_version_info() {
     VERSION_SOURCE=""
     VERSION_DETAILS=""
 
-    if [ -d "flutter_unified_repo/engine/src/flutter/.git" ]; then
-        cd flutter_unified_repo/engine/src/flutter
+    if [ -d "flutter_unified_repo/.git" ]; then
+        cd flutter_unified_repo
 
         # 1. 首先尝试从分支名提取版本号（如 3.38.7-image_crash）
         local branch_name=$(git branch --show-current 2>/dev/null)
